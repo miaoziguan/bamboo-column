@@ -44,7 +44,7 @@ function runGenerate(rootDir, { strict = false } = {}) {
     throw new Error(`index.json 不存在: ${indexPath}`);
   }
 
-  const index = JSON.parse(fs.readFileSync(indexPath, "utf8"));
+  let index = JSON.parse(fs.readFileSync(indexPath, "utf8"));
   let updated = 0;
   let invalid = 0;
   let inconsistent = 0;
@@ -72,7 +72,39 @@ function runGenerate(rootDir, { strict = false } = {}) {
     updated++;
   }
 
-  // 2) 一致性检查：articles/ 下每个 .md 是否都有对应 index.json 条目
+  // 2) 去重：同一篇文章（分类 + 规范化标题相同）可能因改日期/标题而生成多条
+  //     slug，导致列表出现重复。保留日期最新的一条，并删除被淘汰条目对应的 .md 文件。
+  const byKey = new Map();
+  const keptEntries = [];
+  const droppedEntries = [];
+  for (const entry of index) {
+    const key = `${entry.category}||${(entry.title ?? "").trim()}`;
+    const prev = byKey.get(key);
+    if (prev === undefined) {
+      byKey.set(key, entry);
+      keptEntries.push(entry);
+    } else if (String(entry.date) > String(prev.date)) {
+      byKey.set(key, entry);
+      droppedEntries.push(prev);
+      const ki = keptEntries.indexOf(prev);
+      if (ki >= 0) keptEntries[ki] = entry;
+    } else {
+      droppedEntries.push(entry);
+    }
+  }
+  for (const d of droppedEntries) {
+    const fp = mdPath(articlesDir, d.slug);
+    const keepSlug = byKey.get(`${d.category}||${(d.title ?? "").trim()}`).slug;
+    if (fs.existsSync(fp)) {
+      fs.rmSync(fp);
+      console.warn(`  [去重] 已删除重复条目及其文件: ${d.slug}.md（保留 ${keepSlug}）`);
+    } else {
+      console.warn(`  [去重] 已移除重复条目: ${d.slug}（保留 ${keepSlug}）`);
+    }
+  }
+  if (droppedEntries.length > 0) index = keptEntries;
+
+  // 3) 一致性检查：articles/ 下每个 .md 是否都有对应 index.json 条目
   const mdFiles = fs
     .readdirSync(articlesDir)
     .filter((f) => f.endsWith(".md"))
@@ -96,7 +128,7 @@ function runGenerate(rootDir, { strict = false } = {}) {
 
   fs.writeFileSync(indexPath, JSON.stringify(index, null, 2) + "\n", "utf8");
   console.log(
-    `完成: ${updated} 篇文章已更新 hash，无效 ${invalid} 项，不一致 ${inconsistent} 处`,
+    `完成: ${updated} 篇文章已更新 hash，无效 ${invalid} 项，不一致 ${inconsistent} 处，去重 ${droppedEntries.length} 条`,
   );
   return { updated, invalid, inconsistent };
 }
